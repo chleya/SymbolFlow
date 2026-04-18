@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SymbolFlow — 语言关联可视化</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪝</text></svg>">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 100vw; height: 100vh;
+      overflow: hidden;
+      background: #080812;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      color: #d0d0e8;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    /* ===== 启动画面 ===== */
+    #splash {
+      position: fixed; inset: 0;
+      background: #080812;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 9999;
+      transition: opacity 0.8s ease;
+    }
+    #splash.fade-out { opacity: 0; pointer-events: none; }
+    .sp-logo {
+      font-size: 80px; margin-bottom: 20px;
+      animation: spFloat 2.4s ease-in-out infinite;
+    }
+    @keyframes spFloat {
+      0%,100% { transform: translateY(0) scale(1); }
+      50% { transform: translateY(-12px) scale(1.05); }
+    }
+    .sp-title { font-size: 42px; font-weight: 700; color: white; letter-spacing: 8px; margin-bottom: 8px; }
+    .sp-sub { font-size: 12px; color: rgba(255,255,255,0.3); margin-bottom: 40px; letter-spacing: 3px; }
+    .sp-dots { display: flex; gap: 8px; }
+    .sp-dot { width: 6px; height: 6px; background: rgba(255,255,255,0.15); border-radius: 50%; animation: spPulse 1.6s ease infinite; }
+    .sp-dot:nth-child(2) { animation-delay: 0.25s; }
+    .sp-dot:nth-child(3) { animation-delay: 0.5s; }
+    @keyframes spPulse {
+      0%,100% { background: rgba(255,255,255,0.15); transform: scale(1); }
+      50% { background: #a78bfa; transform: scale(1.6); box-shadow: 0 0 12px #a78bfa80; }
+    }
+
+    /* ===== 主容器 ===== */
+    #app {
+      width: 1140px; height: 740px;
+      background: #0c0c1e;
+      border-radius: 18px;
+      box-shadow: 0 24px 100px rgba(0,0,0,0.7);
+      display: flex; flex-direction: column;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* ===== 顶栏 ===== */
+    #topbar {
+      height: 52px; background: #10102a;
+      border-bottom: 1px solid #1e1e40;
+      display: flex; align-items: center;
+      padding: 0 18px; gap: 10px; flex-shrink: 0;
+    }
+    .topbar-title { font-size: 13px; font-weight: 700; color: #a78bfa; letter-spacing: 3px; margin-right: 6px; }
+    #seed-input {
+      flex: 1; max-width: 300px; height: 32px;
+      background: #18183a; border: 1px solid #2a2a55;
+      border-radius: 8px; color: white; font-size: 13px;
+      padding: 0 14px; outline: none; transition: border-color 0.2s;
+    }
+    #seed-input:focus { border-color: #a78bfa; }
+    #seed-input::placeholder { color: #444; }
+    .tb-btn {
+      padding: 6px 14px; border: 1px solid #2a2a55; border-radius: 8px;
+      background: #18183a; color: #888; font-size: 12px;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .tb-btn:hover { background: #252550; color: #d0d0e8; }
+    .tb-btn.pri { background: #7c3aed; border-color: #7c3aed; color: white; }
+    .tb-btn.pri:hover { background: #6d28d9; }
+    .tb-spacer { flex: 1; }
+
+    /* ===== 主体 ===== */
+    #body { flex: 1; display: flex; overflow: hidden; }
+
+    /* ===== 画布 ===== */
+    #canvas-area {
+      flex: 1; position: relative;
+      background: #080812;
+      background-image: radial-gradient(circle, #151530 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+    #canvas-area svg { width: 100%; height: 100%; }
+
+    /* 边 */
+    .edge {
+      fill: none;
+      stroke-width: 1.8;
+      stroke-dasharray: 0;
+    }
+    .edge.causal  { stroke: #60a5fa; }
+    .edge.similar { stroke: #34d399; }
+    .edge.contrast{ stroke: #f87171; }
+    .edge.metaphor{ stroke: #c084fc; }
+    .edge.extend  { stroke: #6b7280; }
+    .edge.user    { stroke: #fbbf24; stroke-dasharray: 4 3; }
+
+    .edge-path { fill: none; stroke-width: 0; pointer-events: none; }
+
+    /* 节点 */
+    .node circle {
+      fill: #131330;
+      stroke-width: 2.5;
+      cursor: pointer;
+      transition: r 0.2s;
+    }
+    .node:hover circle { r: 30 !important; }
+    .node.root circle { stroke: #fb923c; stroke-width: 3; }
+    .node.current circle {
+      stroke: #4ade80;
+      stroke-width: 3;
+      filter: drop-shadow(0 0 10px #4ade8080);
+    }
+    .node.selected circle { stroke: #fbbf24; stroke-width: 3; }
+    .node circle { r: 24; }
+
+    .node text {
+      fill: #b0b0cc;
+      font-size: 12px;
+      text-anchor: middle;
+      dominant-baseline: middle;
+      pointer-events: none;
+      user-select: none;
+    }
+    .node.current text { fill: #4ade80; font-weight: 600; }
+
+    /* 边标签 */
+    .edge-label {
+      fill: #555;
+      font-size: 9px;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+
+    /* 空状态 */
+    #empty-hint {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center; color: #333;
+      font-size: 15px; pointer-events: none;
+      line-height: 2;
+    }
+    #empty-hint small { display: block; font-size: 11px; color: #252540; margin-top: 4px; }
+
+    /* 当前步指示 */
+    #step-trail {
+      position: absolute; bottom: 12px; left: 50%;
+      transform: translateX(-50%);
+      display: flex; gap: 4px; align-items: center;
+      pointer-events: none;
+    }
+    .trail-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #2a2a55;
+      transition: all 0.3s;
+    }
+    .trail-dot.active { background: #a78bfa; transform: scale(1.5); box-shadow: 0 0 8px #a78bfa80; }
+    .trail-dot.done { background: #4a4a80; }
+
+    /* ===== 侧边栏 ===== */
+    #sidebar {
+      width: 230px; background: #0e0e24;
+      border-left: 1px solid #1a1a38;
+      display: flex; flex-direction: column;
+    }
+
+    #sidebar h3 {
+      font-size: 9px; color: #444;
+      text-transform: uppercase; letter-spacing: 2px;
+      padding: 12px 14px 6px;
+    }
+
+    #history-list {
+      flex: 1; overflow-y: auto; padding: 0 10px;
+    }
+    #history-list::-webkit-scrollbar { width: 3px; }
+    #history-list::-webkit-scrollbar-thumb { background: #2a2a55; border-radius: 2px; }
+
+    .hist-item {
+      padding: 8px 10px; border-radius: 8px;
+      margin-bottom: 3px; cursor: pointer;
+      border: 1px solid transparent; transition: all 0.2s;
+    }
+    .hist-item:hover { background: #18183a; }
+    .hist-item.on { background: #18183a; border-color: #7c3aed; }
+    .hist-item .h-seed { font-size: 13px; color: #a78bfa; font-weight: 500; }
+    .hist-item .h-meta { font-size: 10px; color: #444; margin-top: 2px; }
+    .hist-item .h-bar { height: 2px; background: #1e1e3e; border-radius: 1px; margin-top: 5px; overflow: hidden; }
+    .hist-item .h-bar-fill { height: 100%; background: #7c3aed; border-radius: 1px; transition: width 0.3s; }
+
+    /* ===== 信息面板 ===== */
+    #info-panel {
+      border-top: 1px solid #1a1a38;
+      padding: 12px 14px;
+    }
+    #info-panel .info-label { font-size: 16px; color: #e0e0f0; font-weight: 600; margin-bottom: 4px; }
+    #info-panel .info-reason { font-size: 11px; color: #666; line-height: 1.6; margin-bottom: 6px; }
+    #info-panel .info-meta { font-size: 10px; color: #444; margin-bottom: 8px; }
+    .infoActs { display: flex; gap: 4px; flex-wrap: wrap; }
+    .infoBtn {
+      padding: 3px 8px; border: 1px solid #2a2a55; border-radius: 5px;
+      background: #131330; color: #888; font-size: 10px;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .infoBtn:hover { background: #1e1e40; color: #d0d0e8; }
+    .infoBtn.red:hover { background: #2a1010; color: #f87171; border-color: #6a2020; }
+
+    /* ===== 控制条 ===== */
+    #ctrlbar {
+      height: 50px; background: #10102a;
+      border-top: 1px solid #1e1e40;
+      display: flex; align-items: center;
+      padding: 0 16px; gap: 12px; flex-shrink: 0;
+    }
+    .ctrl-btn {
+      width: 32px; height: 32px; border: 1px solid #2a2a55; border-radius: 50%;
+      background: #18183a; cursor: pointer;
+      font-size: 13px; display: flex; align-items: center;
+      justify-content: center; transition: all 0.2s; color: #888;
+    }
+    .ctrl-btn:hover { background: #252550; color: white; transform: scale(1.1); }
+    .ctrl-btn.on { background: #7c3aed; border-color: #7c3aed; color: white; }
+    .ctrl-sep { width: 1px; height: 22px; background: #1e1e40; }
+    .ctrl-grp { display: flex; align-items: center; gap: 5px; font-size: 10px; color: #444; }
+    .ctrl-range { width: 72px; accent-color: #a78bfa; }
+    .ctrl-stat { font-size: 10px; color: #333; }
+    .ctrl-stat span { color: #a78bfa; }
+
+    /* ===== 设置弹窗 ===== */
+    #set-modal {
+      position: absolute; inset: 0;
+      background: rgba(0,0,0,0.65);
+      display: none; align-items: center; justify-content: center; z-index: 100;
+    }
+    #set-modal.open { display: flex; }
+    .modal-card {
+      background: #10102a; border: 1px solid #2a2a55; border-radius: 14px;
+      padding: 26px; width: 370px;
+    }
+    .modal-card h2 { font-size: 14px; color: white; margin-bottom: 18px; }
+    .srow { margin-bottom: 12px; }
+    .srow label { display: block; font-size: 10px; color: #555; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 1px; }
+    .srow input {
+      width: 100%; height: 32px; background: #18183a; border: 1px solid #2a2a55;
+      border-radius: 7px; color: white; font-size: 12px; padding: 0 10px; outline: none;
+    }
+    .srow input:focus { border-color: #a78bfa; }
+    .macts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+  </style>
+</head>
+<body>
+
+<!-- 启动画面 -->
+<div id="splash">
+  <div class="sp-logo">🪝</div>
+  <div class="sp-title">SymbolFlow</div>
+  <div class="sp-sub">语言关联可视化</div>
+  <div class="sp-dots">
+    <div class="sp-dot"></div>
+    <div class="sp-dot"></div>
+    <div class="sp-dot"></div>
+  </div>
+</div>
+
+<div id="app">
+  <!-- 顶栏 -->
+  <div id="topbar">
+    <span class="topbar-title">SymbolFlow</span>
+    <input type="text" id="seed-input" placeholder="输入种子词，开始游走...">
+    <button class="tb-btn pri" id="start-btn">▶ 开始</button>
+    <div class="tb-spacer"></div>
+    <button class="tb-btn" id="clear-btn">🗑</button>
+    <button class="tb-btn" id="export-btn">↓</button>
+    <button class="tb-btn" id="set-btn">⚙</button>
+  </div>
+
+  <!-- 主体 -->
+  <div id="body">
+    <!-- 画布 -->
+    <div id="canvas-area">
+      <svg id="graph-svg">
+        <defs>
+          <marker id="arr" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+            <polygon points="0 0,7 2.5,0 5" fill="#3a3a6a"/>
+          </marker>
+        </defs>
+      </svg>
+      <div id="empty-hint">
+        输入种子词，按回车
+        <small>语言关联会在此浮现</small>
+      </div>
+      <div id="step-trail"></div>
+    </div>
+
+    <!-- 侧边栏 -->
+    <div id="sidebar">
+      <h3>游走历史</h3>
+      <div id="history-list"></div>
+      <div id="info-panel">
+        <div class="info-label" id="i-label">—</div>
+        <div class="info-reason" id="i-reason">点击节点查看详情</div>
+        <div class="info-meta" id="i-meta"></div>
+        <div class="infoActs" id="iActs"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 控制条 -->
+  <div id="ctrlbar">
+    <button class="ctrl-btn" id="play-ctrl" title="继续">▶</button>
+    <button class="ctrl-btn" id="pause-ctrl" title="暂停">⏸</button>
+    <div class="ctrl-sep"></div>
+    <div class="ctrl-grp"><span>速度</span><input type="range" class="ctrl-range" id="spd-rng" min="1" max="10" value="5"></div>
+    <div class="ctrl-grp"><span>温度</span><input type="range" class="ctrl-range" id="tmp-rng" min="3" max="15" value="9"></div>
+    <div class="ctrl-sep"></div>
+    <div class="ctrl-stat">步 <span id="s-cur">0</span>/<span id="s-max">50</span></div>
+    <div class="ctrl-stat">种子 <span id="s-seed">—</span></div>
+    <button class="ctrl-btn" id="rep-btn" title="回放">↺</button>
+  </div>
+
+  <!-- 设置 -->
+  <div id="set-modal">
+    <div class="modal-card">
+      <h2>⚙ API 设置</h2>
+      <div class="srow"><label>Base URL</label><input type="text" id="s-base" value="https://api.minimaxi.com/anthropic"></div>
+      <div class="srow"><label>API Key</label><input type="password" id="s-key" placeholder="sk-..."></div>
+      <div class="srow"><label>Model</label><input type="text" id="s-model" value="abab6.5s-chat"></div>
+      <div class="srow"><label>最大步数</label><input type="number" id="s-maxs" value="50" min="5" max="200"></div>
+      <div class="macts">
+        <button class="tb-btn" id="s-cancel">取消</button>
+        <button class="tb-btn pri" id="s-save">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ========== 配置 ==========
+  let cfg = {
+    baseURL: localStorage.getItem('sf_base') || 'https://api.minimaxi.com/anthropic',
+    apiKey:   localStorage.getItem('sf_key')  || '',
+    model:    localStorage.getItem('sf_model') || 'abab6.5s-chat',
+    maxSteps: 50,
+  };
+
+  // ========== 状态 ==========
+  let Gnodes = [];
+  let Gedges = [];
+  let steps  = [];
+  let curN   = null;
+  let selN   = null;
+  let running = false;
+  let walkTmr = null;
+  let nidCtr  = 0;
+  let runId   = null;
+
+  // ========== D3 ==========
+  const svgEl = document.getElementById('graph-svg');
+  const svg   = d3.select(svgEl);
+  let sim = null;
+  let ns, es; // node/edge selections
+
+  function initSim() {
+    const r = document.getElementById('canvas-area');
+    const w = r.clientWidth, h = r.clientHeight;
+    svg.attr('viewBox', `0 0 ${w} ${h}`);
+    sim = d3.forceSimulation()
+      .force('link', d3.forceLink().id(d => d.id).distance(120).strength(0.4))
+      .force('charge', d3.forceManyBody().strength(-300))
+      .force('center', d3.forceCenter(w/2, h/2))
+      .force('collide', d3.forceCollide().radius(45));
+    sim.on('tick', tick);
+  }
+
+  // 把 GEdges 的 from/to 转换成 D3 force 需要的 source/target
+  function toD3Links() {
+    return Gedges.map(e => ({
+      from: e.from,
+      to: e.to,
+      reason: e.reason,
+      type: e.type,
+      source: Gnodes.find(n => n.id === e.from),
+      target: Gnodes.find(n => n.id === e.to),
+    }));
+  }
+
+  function tick() {
+    if (!ns || ns.empty()) return;
+    ns.attr('transform', d => `translate(${d.x||0},${d.y||0})`);
+    if (!es || es.empty()) return;
+    es.each(function(d) {
+      const s = Gnodes.find(n => n.id === d.from);
+      const t = Gnodes.find(n => n.id === d.to);
+      if (!s || !t) return;
+      const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2 - 22;
+      d3.select(this).attr('d', `M${s.x},${s.y} Q${mx},${my} ${t.x},${t.y}`);
+    });
+  }
+
+  function render() {
+    const r = document.getElementById('canvas-area');
+    const w = r.clientWidth, h = r.clientHeight;
+    svg.attr('viewBox', `0 0 ${w} ${h}`);
+
+    document.getElementById('empty-hint').style.display = Gnodes.length === 0 ? 'block' : 'none';
+
+    // Edges
+    es = svg.selectAll('.edge').data(Gedges, d => d.from+'-'+d.to);
+    es.exit().remove();
+    const eEnter = es.enter().insert('path', '.node').attr('class', d => `edge ${d.type||'extend'}`);
+    es = eEnter.merge(es);
+
+    // Nodes
+    ns = svg.selectAll('.node').data(Gnodes, d => d.id);
+    ns.exit().remove();
+    const nEnter = ns.enter().append('g').attr('class', 'node')
+      .call(d3.drag().on('start', ds).on('drag', dd).on('end', de))
+      .on('click', (e,d) => { e.stopPropagation(); sel(d.id); })
+      .on('dblclick', (e,d) => { e.stopPropagation(); if (!running) { curN=d.id; render(); } });
+
+    nEnter.append('circle');
+    nEnter.append('text');
+
+    ns = nEnter.merge(ns);
+    ns.select('circle')
+      .attr('r', 24)
+      .attr('stroke', d => d.id===curN?'#4ade80':d.id===selN?'#fbbf24':d.id===Gnodes[0]?.id?'#fb923c':'#6b7280');
+    ns.select('text').text(d => d.label);
+    ns.attr('class', d => {
+      let c = 'node';
+      if (d.id === curN) c += ' current';
+      else if (d.id === selN) c += ' selected';
+      return c;
+    });
+
+    if (Gnodes.length > 0) {
+      sim.nodes(Gnodes);
+      // 把 GEdges 的 from/to 映射为 D3 需要 source/target
+      const linkData = Gedges.map(e => ({
+        from: e.from, to: e.to, reason: e.reason, type: e.type,
+        source: Gnodes.find(n => n.id === e.from),
+        target: Gnodes.find(n => n.id === e.to),
+      }));
+      sim.force('link').links(linkData);
+      sim.alpha(0.4).restart();
+    }
+
+    updateTrail();
+  }
+
+  function ds(e, d) {
+    if (!e.active) sim.alphaTarget(0.3).restart();
+    d.fx = d.x; d.fy = d.y;
+  }
+  function dd(e, d) { d.fx = e.x; d.fy = e.y; }
+  function de(e, d) {
+    if (!e.active) sim.alphaTarget(0);
+    d.fx = null; d.fy = null;
+  }
+
+  // ========== LLM 钩子 ==========
+  async function hook(from) {
+    const temp = parseInt(document.getElementById('tmp-rng').value) / 10;
+    const exist = Gedges.map(e => `${e.from}→${e.to}`).join('，') || '无';
+
+    const systemPrompt = `词语联想游戏。从给出的词想到下一个词。
+输出格式（必须包含）：{"next":"联想词","reason":"原因","type":"关系"}
+关系类型：因果/相似/反义/隐喻/递进
+只输出JSON，不要模板示例。`;
+
+    try {
+      // 使用 Anthropic 兼容端点，增大 max_tokens 让 thinking + JSON 都能出来
+      let raw;
+      const r = await fetch(`${cfg.baseURL}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type':'application/json',
+          'Authorization': `Bearer ${cfg.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: cfg.model,
+          max_tokens: 500,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `词：${from}。已有：${exist || '无'}` },
+          ],
+          temperature: temp,
+        }),
+      });
+      raw = await r.text();
+
+      let result = null;
+      try {
+        const outer = JSON.parse(raw);
+        // 优先从 type:"text" 提取（可靠 JSON）
+        if (outer.content && Array.isArray(outer.content)) {
+          for (const item of outer.content) {
+            if (item.type === 'text' && item.text) {
+              const j = extractJSON(item.text);
+              if (j && j.next) { result = j; break; }
+            }
+          }
+        }
+        // 其次从 type:"thinking" 提取（可能不完整，慎用完整 JSON 解析）
+        if (!result && outer.content && Array.isArray(outer.content)) {
+          for (const item of outer.content) {
+            if (item.thinking) {
+              // 用更严格的方式：只接受完整的 {..."next"..."reason"..."type"...} 形式
+              const j = extractJSON(item.thinking);
+              if (j && j.next) { result = j; break; }
+            }
+          }
+        }
+        // OpenAI 格式兜底
+        if (!result && outer.choices && Array.isArray(outer.choices) && outer.choices[0]?.message?.content) {
+          const j = extractJSON(outer.choices[0].message.content);
+          if (j && j.next) result = j;
+        }
+      } catch {}
+
+      // 最后兜底：直接扫描 raw 中的 {...} 完整块
+      if (!result) {
+        const j = extractJSON(raw);
+        if (j && j.next) result = j;
+      }
+
+      if (!result || !result.next) throw new Error('no valid json: ' + raw.substring(0, 100));
+
+      // 验证：next 必须是2-6个汉字，不是 n3、null、undefined 等
+      if (!/^[\u4e00-\u9fa5]{2,6}$/.test(result.next)) {
+        throw new Error('next not valid Chinese word: ' + result.next);
+      }
+
+      // str 中提取 JSON：优先完整 {...} 对象，其次正则字段
+      function extractJSON(str) {
+        if (!str) return null;
+        // 策略1：找第一个完整 {...} JSON 对象
+        const braceStart = str.indexOf('{');
+        if (braceStart >= 0) {
+          let depth = 0;
+          for (let i = braceStart; i < str.length; i++) {
+            if (str[i] === '{') depth++;
+            else if (str[i] === '}') { depth--; if (depth === 0) {
+              try {
+                const obj = JSON.parse(str.substring(braceStart, i + 1));
+                if (obj.next) return obj;
+              } catch {}
+              break;
+            }}
+          }
+        }
+        // 策略2：正则找 "next":"xxx"
+        const m = str.match(/"next"\s*:\s*"([^"]{1,10})"/);
+        if (m) {
+          return { next: m[1], reason: (str.match(/"reason"\s*:\s*"([^"]{1,20})"/)||[])[1] || '语言联想', type: (str.match(/"type"\s*:\s*"([^"]{1,10})"/)||[])[1] || '递进' };
+        }
+        return null;
+      }
+      return { next: result.next, reason: result.reason || '语言联想', type: result.type || '递进' };
+    } catch(e) {
+      console.warn('hook fail:', e.message);
+      const fallbacks = ['选择','存在','边界','联系','本质','时间','因果'];
+      return { next: fallbacks[Math.floor(Math.random()*fallbacks.length)], reason: '语言空间随机游走', type:'递进' };
+    }
+  }
+
+  // ========== 游走 ==========
+  async function startWalk(seed) {
+    if (!cfg.apiKey) { alert('请先设置 API Key ⚙'); return; }
+    Gnodes=[]; Gedges=[]; steps=[]; nidCtr=0;
+    curN = 'n1';
+    Gnodes.push({ id:'n1', label:seed.trim(), fixed:false });
+    running = true;
+    runId = Date.now().toString();
+    document.getElementById('empty-hint').style.display='none';
+    document.getElementById('s-seed').textContent = seed;
+    document.getElementById('s-cur').textContent = '0';
+    document.getElementById('s-max').textContent = cfg.maxSteps;
+    render();
+    await delay(500);
+    await walk();
+  }
+
+  async function walk() {
+    while (running && Gnodes.length < cfg.maxSteps) {
+      const cur = Gnodes.find(n => n.id === curN);
+      if (!cur) break;
+
+      const r = await hook(cur.label);
+      let tgt = Gnodes.find(n => n.label === r.next);
+      if (!tgt) { tgt = { id:'n'+(++nidCtr), label:r.next, fixed:false }; Gnodes.push(tgt); }
+
+      // 记录步骤
+      steps.push({ step:steps.length+1, from:cur.label, to:r.next, fromId:cur.id, toId:tgt.id, reason:r.reason, type:r.type, ts:new Date().toISOString() });
+
+      // 边
+      if (!Gedges.find(e=>e.from===cur.id&&e.to===tgt.id)) {
+        Gedges.push({ from:cur.id, to:tgt.id, reason:r.reason, type:r.type||'递进' });
+      }
+
+      curN = tgt.id;
+      document.getElementById('s-cur').textContent = steps.length;
+      render();
+      sel(curN);
+
+      await delay(getDelay());
+    }
+    if (running) {
+      running = false;
+      saveHist();
+      updatePlayBtn();
+    }
+  }
+
+  function getDelay() {
+    return 2200 - parseInt(document.getElementById('spd-rng').value) * 200;
+  }
+
+  function pause() { running=false; updatePlayBtn(); }
+  function resume() {
+    if (!running && Gnodes.length>0 && Gnodes.length<cfg.maxSteps) {
+      running=true; updatePlayBtn(); walk();
+    }
+  }
+  function updatePlayBtn() {
+    document.getElementById('play-ctrl').classList.toggle('on', running);
+  }
+
+  // ========== 节点交互 ==========
+  function sel(id) {
+    selN = id;
+    const n = Gnodes.find(n=>n.id===id);
+    if (!n) return;
+    document.getElementById('i-label').textContent = n.label;
+    const ins = Gedges.filter(e=>e.to===id);
+    const ous = Gedges.filter(e=>e.from===id);
+    document.getElementById('i-reason').textContent = ins.length
+      ? `← "${Gnodes.find(x=>x.id===ins[0].from)?.label}"：${ins[0].reason} (${ins[0].type})`
+      : '（根节点）';
+    document.getElementById('i-meta').textContent = `入度:${ins.length}  出度:${ous.length}`;
+    document.getElementById('iActs').innerHTML = `
+      <button class="infoBtn" onclick="focusAt('${id}')">🔍 聚焦</button>
+      <button class="infoBtn" onclick="fixN('${id}')">📌 ${n.fixed?'取消':'固定'}</button>
+      <button class="infoBtn" onclick="addKid('${id}')">+ 子节点</button>
+      <button class="infoBtn red" onclick="delN('${id}')">🗑</button>
+    `;
+    render();
+  }
+
+  function focusAt(id) {
+    if (!running) {
+      curN = id;
+      document.getElementById('s-seed').textContent = Gnodes[0]?.label + ' → ' + Gnodes.find(n=>n.id===id)?.label;
+      render();
+    }
+  }
+
+  function fixN(id) {
+    const n = Gnodes.find(n=>n.id===id);
+    if (!n) return;
+    n.fixed = !n.fixed;
+    if (n.fixed) { n.fx=n.x||0; n.fy=n.y||0; } else { n.fx=null; n.fy=null; }
+    render();
+  }
+
+  function delN(id) {
+    if (Gnodes.length <= 1) { clearAll(); return; }
+    Gedges = Gedges.filter(e=>e.from!==id&&e.to!==id);
+    Gnodes = Gnodes.filter(n=>n.id!==id);
+    if (curN===id) curN = Gnodes[Gnodes.length-1].id;
+    if (selN===id) selN = null;
+    render();
+    if (!selN) { document.getElementById('i-label').textContent='—'; document.getElementById('i-reason').textContent='点击节点查看详情'; document.getElementById('i-meta').textContent=''; document.getElementById('iActs').innerHTML=''; }
+    saveHist();
+  }
+
+  function addKid(pid) {
+    const lbl = prompt('子节点内容:');
+    if (!lbl) return;
+    const p = Gnodes.find(n=>n.id===pid);
+    const nid = 'n'+(++nidCtr);
+    Gnodes.push({ id:nid, label:lbl.trim(), fixed:false });
+    Gedges.push({ from:pid, to:nid, reason:'用户添加', type:'user' });
+    steps.push({ step:steps.length+1, from:p.label, to:lbl.trim(), fromId:pid, toId:nid, reason:'用户添加', type:'user', ts:new Date().toISOString() });
+    document.getElementById('s-cur').textContent = steps.length;
+    render();
+    saveHist();
+  }
+
+  // ========== 历史 ==========
+  function saveHist() {
+    if (steps.length === 0) return;
+    const rec = { id:runId, seed:Gnodes[0]?.label||'?', steps, ts:new Date().toISOString() };
+    let hist = JSON.parse(localStorage.getItem('sf_hist')||'[]');
+    const i = hist.findIndex(h=>h.id===runId);
+    if (i>=0) hist[i]=rec; else hist.unshift(rec);
+    if (hist.length>50) hist.pop();
+    localStorage.setItem('sf_hist', JSON.stringify(hist));
+    renderHist();
+  }
+
+  function renderHist() {
+    const hist = JSON.parse(localStorage.getItem('sf_hist')||'[]');
+    const el = document.getElementById('history-list');
+    if (!hist.length) { el.innerHTML='<div style="font-size:11px;color:#333;text-align:center;padding:16px">暂无历史</div>'; return; }
+    el.innerHTML = hist.slice(0,20).map(h => {
+      const d = new Date(h.ts);
+      const t = `${d.getMonth()+1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`;
+      return `<div class="hist-item${h.id===runId?' on':''}" onclick="loadRec('${h.id}')">
+        <div class="h-seed">${h.seed}</div>
+        <div class="h-meta">${t} · ${h.steps.length}步</div>
+        <div class="h-bar"><div class="h-bar-fill" style="width:${Math.min(100,h.steps.length/cfg.maxSteps*100)}%"></div></div>
+      </div>`;
+    }).join('');
+  }
+
+  function loadRec(id) {
+    const hist = JSON.parse(localStorage.getItem('sf_hist')||'[]');
+    const r = hist.find(h=>h.id===id);
+    if (!r) return;
+    pause();
+    Gnodes=[]; Gedges=[]; steps=r.steps; nidCtr=0;
+    const root = { id:'n1', label:r.steps[0]?.from||r.seed, fixed:false };
+    Gnodes.push(root);
+    r.steps.forEach(s => {
+      let t = Gnodes.find(n=>n.label===s.to);
+      if (!t) { t={id:'n'+(++nidCtr),label:s.to,fixed:false}; Gnodes.push(t); }
+      if (!Gedges.find(e=>e.from===Gnodes[Gnodes.length-1].id&&e.to===t.id)) {
+        Gedges.push({ from:Gnodes[Gnodes.length-1].id, to:t.id, reason:s.reason, type:s.type });
+      }
+    });
+    curN = Gnodes[Gnodes.length-1].id;
+    selN = null;
+    runId = id;
+    document.getElementById('s-seed').textContent = r.seed;
+    document.getElementById('s-cur').textContent = steps.length;
+    document.getElementById('s-max').textContent = cfg.maxSteps;
+    render();
+    renderHist();
+  }
+
+  async function replay(id) {
+    const hist = JSON.parse(localStorage.getItem('sf_hist')||'[]');
+    const r = hist.find(h=>h.id===id);
+    if (!r) return;
+    pause();
+    Gnodes=[]; Gedges=[]; steps=[]; nidCtr=0; running=true;
+    const root = { id:'n1', label:r.steps[0]?.from||r.seed, fixed:true, x:570, y:370 };
+    Gnodes.push(root);
+    curN='n1';
+    document.getElementById('s-cur').textContent='0';
+    render();
+    await delay(600);
+    for (let i=0; i<r.steps.length; i++) {
+      const s = r.steps[i];
+      const nid = 'n'+(++nidCtr);
+      Gnodes.push({ id:nid, label:s.to, fixed:false });
+      Gedges.push({ from:Gnodes[Gnodes.length-2].id, to:nid, reason:s.reason, type:s.type||'递进' });
+      curN = nid;
+      document.getElementById('s-cur').textContent = i+1;
+      render();
+      await delay(getDelay());
+    }
+    running=false; saveHist();
+  }
+
+  // ========== 导出 ==========
+  function exportData() {
+    if (!Gnodes.length) return;
+    const data = {
+      seed: Gnodes[0]?.label,
+      exported: new Date().toISOString(),
+      nodes: Gnodes.map(n=>({id:n.id, label:n.label})),
+      edges: Gedges.map(e=>({
+        from: Gnodes.find(n=>n.id===e.from)?.label,
+        to:   Gnodes.find(n=>n.id===e.to)?.label,
+        reason: e.reason, type: e.type
+      })),
+      steps,
+    };
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
+    a.download = `sf-${Date.now()}.json`;
+    a.click();
+  }
+
+  // ========== 步迹条 ==========
+  function updateTrail() {
+    const el = document.getElementById('step-trail');
+    el.innerHTML = steps.map((s,i) =>
+      `<div class="trail-dot${i===steps.length-1&&running?' active':''}${i<steps.length-1?' done':''}"></div>`
+    ).join('');
+  }
+
+  // ========== 清空 ==========
+  function clearAll() {
+    pause();
+    Gnodes=[]; Gedges=[]; steps=[]; nidCtr=0; curN=null; selN=null;
+    render();
+    document.getElementById('i-label').textContent='—';
+    document.getElementById('i-reason').textContent='点击节点查看详情';
+    document.getElementById('i-meta').textContent='';
+    document.getElementById('iActs').innerHTML='';
+    document.getElementById('s-seed').textContent='—';
+    document.getElementById('s-cur').textContent='0';
+  }
+
+  function delay(ms) { return new Promise(r=>setTimeout(r,ms)); }
+
+  // ========== 事件 ==========
+  document.getElementById('start-btn').addEventListener('click', () => {
+    const v = document.getElementById('seed-input').value.trim();
+    if (!v) return;
+    pause();
+    startWalk(v);
+  });
+  document.getElementById('seed-input').addEventListener('keydown', e => {
+    if (e.key==='Enter') {
+      const v=e.target.value.trim(); if(!v) return;
+      pause(); startWalk(v);
+    }
+  });
+  document.getElementById('play-ctrl').addEventListener('click', resume);
+  document.getElementById('pause-ctrl').addEventListener('click', pause);
+  document.getElementById('clear-btn').addEventListener('click', clearAll);
+  document.getElementById('export-btn').addEventListener('click', exportData);
+  document.getElementById('rep-btn').addEventListener('click', () => {
+    const hist = JSON.parse(localStorage.getItem('sf_hist')||'[]');
+    if (hist.length) replay(hist[0].id);
+  });
+
+  // 设置弹窗
+  document.getElementById('set-btn').addEventListener('click', () => {
+    document.getElementById('s-base').value = cfg.baseURL;
+    document.getElementById('s-key').value = cfg.apiKey;
+    document.getElementById('s-model').value = cfg.model;
+    document.getElementById('s-maxs').value = cfg.maxSteps;
+    document.getElementById('set-modal').classList.add('open');
+  });
+  document.getElementById('s-cancel').addEventListener('click', () => document.getElementById('set-modal').classList.remove('open'));
+  document.getElementById('s-save').addEventListener('click', () => {
+    cfg.baseURL = document.getElementById('s-base').value.trim();
+    cfg.apiKey   = document.getElementById('s-key').value.trim();
+    cfg.model    = document.getElementById('s-model').value.trim();
+    cfg.maxSteps = parseInt(document.getElementById('s-maxs').value) || 50;
+    localStorage.setItem('sf_base', cfg.baseURL);
+    localStorage.setItem('sf_key',  cfg.apiKey);
+    localStorage.setItem('sf_model', cfg.model);
+    document.getElementById('set-modal').classList.remove('open');
+    document.getElementById('s-max').textContent = cfg.maxSteps;
+  });
+
+  // 点击画布空白取消选择
+  document.getElementById('canvas-area').addEventListener('click', () => {
+    selN = null;
+    document.getElementById('i-label').textContent='—';
+    document.getElementById('i-reason').textContent='点击节点查看详情';
+    document.getElementById('i-meta').textContent='';
+    document.getElementById('iActs').innerHTML='';
+    render();
+  });
+
+  // 全局
+  window.sel = sel;
+  window.focusAt = focusAt;
+  window.fixN = fixN;
+  window.delN = delN;
+  window.addKid = addKid;
+  window.loadRec = loadRec;
+  window.replay = replay;
+
+  // ========== 启动 ==========
+  // 如果没有配置过 Key，自动写入 MiniMax 默认值
+  if (!localStorage.getItem('sf_key')) {
+    localStorage.setItem('sf_base', 'https://api.minimaxi.com/anthropic');
+    localStorage.setItem('sf_key', 'sk-cp-KtyKviKJeaydeUtACQRRJt16L5mPtQOuC4XDU9dSjCDsR6bPa_VV7w_CYIYvmf4hjYsssa675YbGJxyiHlANs1rV75BrMjRqPIo3jXIk5e8IBnt7gTx_410');
+    localStorage.setItem('sf_model', 'abab6.5s-chat');
+    cfg.baseURL = 'https://api.minimaxi.com/anthropic';
+    cfg.apiKey = 'sk-cp-KtyKviKJeaydeUtACQRRJt16L5mPtQOuC4XDU9dSjCDsR6bPa_VV7w_CYIYvmf4hjYsssa675YbGJxyiHlANs1rV75BrMjRqPIo3jXIk5e8IBnt7gTx_410';
+    cfg.model = 'abab6.5s-chat';
+  }
+
+  initSim();
+  renderHist();
+  updateTrail();
+
+  setTimeout(() => {
+    document.getElementById('splash').classList.add('fade-out');
+    setTimeout(() => { document.getElementById('splash').style.display='none'; }, 800);
+  }, 2200);
+
+  document.getElementById('seed-input').focus();
+})();
+</script>
+</body>
+</html>
