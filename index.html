@@ -679,8 +679,10 @@
     let haltReason = 'max_loops';
     let allCandidates = [];
     let prevTop = null;
+    let driftSeen = false;
     const pathSet = new Set(path || []);
     const loopCandidates = []; // 每轮的 top-1
+    const allScoredCandidates = []; // 全局所有评分后的候选
 
     for (let loop = 0; loop < maxLoops; loop++) {
       let loopRaw;
@@ -707,11 +709,12 @@
       const cands = extractCandidates(loopRaw);
       if (!cands || cands.length === 0) break;
 
-      allCandidates.push(...cands);
-
       // 评分并排序
       const scored = cands.map(c => ({ ...c, _score: scoreCandidate(c, prevTop, pathSet, loop) }))
         .sort((a, b) => b._score - a._score);
+
+      allCandidates.push(...cands);
+      allScoredCandidates.push(...scored);
 
       const top = scored[0];
       loopCandidates.push(top);
@@ -730,17 +733,16 @@
         }
       }
 
-      // drift 检测：候选命中 drift pattern
+      // drift 检测：标记 drift_seen，不 halt（让循环继续探索更好的方向）
       if (DRIFT_PATTERNS.some(d => top.next.includes(d) || top.reason.includes(d))) {
-        haltReason = 'drift_detected';
-        // 不 halt，但加重惩罚——让下一轮探索其他方向
+        driftSeen = true;
       }
 
       prevTop = top;
     }
 
-    // Coda：从所有候选中选最终 top-1
-    if (loopCandidates.length === 0) {
+    // Coda：从全局评分最高的候选中选最终结果（不是只取最后一轮）
+    if (allScoredCandidates.length === 0) {
       // fallback
       const fallbacks = ['本质', '规律', '联系', '存在', '因果'];
       return {
@@ -751,7 +753,13 @@
       };
     }
 
-    const finalTop = loopCandidates[loopCandidates.length - 1];
+    // 取全局评分最高的候选（排除 drift 命中的，降低其 score 权重）
+    const finalTop = allScoredCandidates
+      .filter(c => !DRIFT_PATTERNS.some(d => c.next.includes(d)))
+      .sort((a, b) => b._score - a._score)[0] || allScoredCandidates[0];
+
+    const haltReasonFinal = driftSeen && haltReason === 'max_loops' ? 'drift_seen' : haltReason;
+
     // 计算 drift_score：候选命中 drift 模式的程度
     const driftCount = allCandidates.filter(c =>
       DRIFT_PATTERNS.some(d => c.next.includes(d) || c.reason.includes(d))
@@ -764,7 +772,7 @@
       type: finalTop.type || '递进',
       diagnostics: {
         loops: loopCandidates.length,
-        halt_reason: haltReason,
+        halt_reason: haltReasonFinal,
         drift_score: Math.round(driftScore * 100) / 100,
         candidate_count: allCandidates.length,
         candidates: allCandidates.slice(0, 10), // 保留前10个用于调试
@@ -778,6 +786,7 @@
     Gnodes=[]; Gedges=[]; steps=[]; nidCtr=0;
     curN = 'n1';
     Gnodes.push({ id:'n1', label:seed.trim(), fixed:false });
+    nidCtr = 1; // 根节点已用 n1，下次从 n2 开始
     running = true;
     runId = Date.now().toString();
     document.getElementById('empty-hint').style.display='none';
@@ -918,11 +927,14 @@
     const hist = JSON.parse(localStorage.getItem('sf_hist')||'[]');
     const el = document.getElementById('history-list');
     if (!hist.length) { el.innerHTML='<div style="font-size:11px;color:#333;text-align:center;padding:16px">暂无历史</div>'; return; }
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
     el.innerHTML = hist.slice(0,20).map(h => {
       const d = new Date(h.ts);
       const t = `${d.getMonth()+1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`;
       return `<div class="hist-item${h.id===runId?' on':''}" onclick="loadRec('${h.id}')">
-        <div class="h-seed">${h.seed}</div>
+        <div class="h-seed">${escHtml(h.seed)}</div>
         <div class="h-meta">${t} · ${h.steps.length}步</div>
         <div class="h-bar"><div class="h-bar-fill" style="width:${Math.min(100,h.steps.length/cfg.maxSteps*100)}%"></div></div>
       </div>`;
@@ -937,14 +949,24 @@
     Gnodes=[]; Gedges=[]; steps=r.steps; nidCtr=0;
     const root = { id:'n1', label:r.steps[0]?.from||r.seed, fixed:false };
     Gnodes.push(root);
+    const nodeMap = {};
+    nodeMap[root.label] = root.id;
+    const labelToId = (label) => {
+      if (!nodeMap[label]) nodeMap[label] = 'n' + (++nidCtr);
+      return nodeMap[label];
+    };
+
+    // 重建节点（去重）+ 边
     r.steps.forEach(s => {
-      let t = Gnodes.find(n=>n.label===s.to);
-      if (!t) { t={id:'n'+(++nidCtr),label:s.to,fixed:false}; Gnodes.push(t); }
-      if (!Gedges.find(e=>e.from===Gnodes[Gnodes.length-1].id&&e.to===t.id)) {
-        Gedges.push({ from:Gnodes[Gnodes.length-1].id, to:t.id, reason:s.reason, type:s.type });
+      const fromId = labelToId(s.from);
+      const toId = labelToId(s.to);
+      if (!Gnodes.find(n => n.id === fromId)) Gnodes.push({ id: fromId, label: s.from, fixed: false });
+      if (!Gnodes.find(n => n.id === toId)) Gnodes.push({ id: toId, label: s.to, fixed: false });
+      if (!Gedges.find(e => e.from === fromId && e.to === toId)) {
+        Gedges.push({ from: fromId, to: toId, reason: s.reason, type: s.type });
       }
     });
-    curN = Gnodes[Gnodes.length-1].id;
+    curN = labelToId(r.steps[r.steps.length - 1]?.to || r.seed);
     selN = null;
     runId = id;
     document.getElementById('s-seed').textContent = r.seed;
@@ -962,6 +984,7 @@
     Gnodes=[]; Gedges=[]; steps=[]; nidCtr=0; running=true;
     const root = { id:'n1', label:r.steps[0]?.from||r.seed, fixed:true, x:570, y:370 };
     Gnodes.push(root);
+    nidCtr = 1; // 根节点已用 n1
     curN='n1';
     document.getElementById('s-cur').textContent='0';
     render();
@@ -1088,10 +1111,10 @@
   // 如果没有配置过 Key，自动写入 MiniMax 默认值
   if (!localStorage.getItem('sf_key')) {
     localStorage.setItem('sf_base', 'https://api.minimaxi.com/anthropic');
-    localStorage.setItem('sf_key', 'sk-cp-KtyKviKJeaydeUtACQRRJt16L5mPtQOuC4XDU9dSjCDsR6bPa_VV7w_CYIYvmf4hjYsssa675YbGJxyiHlANs1rV75BrMjRqPIo3jXIk5e8IBnt7gTx_410');
+    localStorage.setItem('sf_key', ''); // TODO: 用户在设置面板填入自己的 API Key
     localStorage.setItem('sf_model', 'abab6.5s-chat');
     cfg.baseURL = 'https://api.minimaxi.com/anthropic';
-    cfg.apiKey = 'sk-cp-KtyKviKJeaydeUtACQRRJt16L5mPtQOuC4XDU9dSjCDsR6bPa_VV7w_CYIYvmf4hjYsssa675YbGJxyiHlANs1rV75BrMjRqPIo3jXIk5e8IBnt7gTx_410';
+    cfg.apiKey = '';
     cfg.model = 'abab6.5s-chat';
   }
 
