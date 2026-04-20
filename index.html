@@ -580,6 +580,198 @@
     }
   }
 
+  // ========== deepHook — OpenMythos 风格的递归收敛钩子 ==========
+  // Prelude -> Recurrent Loop -> Coda
+  // 输入重注入 + 多轮候选收敛 + 自适应停止 + 漂移检测
+
+  const DRIFT_PATTERNS = [
+    '无名英雄', '英雄', '壮举', '勇气',
+    '金钱', '欲望', '贪婪', '本能', '生存',
+    '权利义务', '责任', '法律', '政治',
+    '时间', '流逝', '消逝', '流势',
+  ];
+
+  const DEPTH_RANK = { '因果': 4, '反义': 3, '隐喻': 2, '递进': 1, '相似': 0 };
+  const CANDIDATES_PER_LOOP = 3;
+  const MAX_LOOPS = 4;
+
+  async function deepHook({ seed, current, path, maxLoops = MAX_LOOPS, temperature = 0.9 }) {
+    const seedLabel = seed || (Gnodes[0] && Gnodes[0].label) || '';
+    const pathStr = path && path.length > 0 ? path.join(' → ') : '无（起点）';
+    const anchorSummary = path.length > 0
+      ? `从种子"${seedLabel}"出发，经过 ${pathStr}，当前在 "${current}"`
+      : `种子："${seedLabel}"，起点`;
+
+    // ── Prelude: 构造重注入上下文 ──
+    function buildPrompt(existingCandidates) {
+      const candText = existingCandidates.length > 0
+        ? `\n已有候选（避免重复）：\n${existingCandidates.map((c, i) => `  ${i+1}. ${c.next}（${c.type}）`).join('\n')}`
+        : '';
+      return `你是语义空间游走引擎。
+
+原始种子：${seedLabel}
+当前节点：${current}
+已有路径：${pathStr}
+锚点摘要：${anchorSummary}
+
+规则：
+- 生成 ${CANDIDATES_PER_LOOP} 个候选跳转词（每个2-6汉字）
+- 优先：因果 > 反义 > 隐喻 > 递进 > 相似
+- 避免漂移到常见表层搭配：${DRIFT_PATTERNS.join('、')}
+- 每一步要有新意，不重复已有路径${candText}
+
+输出JSON数组（每个元素必须包含next/reason/type/confidence）：
+{"candidates":[ {"next":"词","reason":"原因","type":"关系","confidence":0.0}, ... ]}
+只输出JSON，禁止解释。`;
+    }
+
+    // 提取 JSON 数组（兼容多种格式）
+    function extractCandidates(text) {
+      try {
+        // 策略1：完整 JSON 数组
+        const arrStart = text.indexOf('[');
+        const arrEnd = text.lastIndexOf(']');
+        if (arrStart >= 0 && arrEnd > arrStart) {
+          const arr = JSON.parse(text.slice(arrStart, arrEnd + 1));
+          if (Array.isArray(arr) && arr[0] && arr[0].next) return arr;
+        }
+        // 策略2：从 text 字段提取（MiniMax 嵌套格式）
+        const obj = JSON.parse(text);
+        if (obj.candidates && Array.isArray(obj.candidates)) return obj.candidates;
+        if (obj.content && Array.isArray(obj.content)) {
+          for (const item of obj.content) {
+            if (item.type === 'text' && item.text) {
+              const sub = extractCandidates(item.text);
+              if (sub) return sub;
+            }
+          }
+        }
+      } catch {}
+      // 策略3：正则兜底
+      const matches = [];
+      const re = /"next"\s*:\s*"([^"]{1,6})"\s*,\s*"reason"\s*:\s*"([^"]{1,20})"\s*,\s*"type"\s*:\s*"([^"]{1,6})"\s*,\s*"confidence"\s*:\s*([0-9.]+)/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        matches.push({ next: m[1], reason: m[2], type: m[3], confidence: parseFloat(m[4]) || 0.5 });
+      }
+      if (matches.length > 0) return matches;
+      return null;
+    }
+
+    // 候选评分
+    function scoreCandidate(c, prevTop, pathSet, loopIdx) {
+      let score = c.confidence || 0.5;
+      // 深度优先：因果>反义>隐喻>递进>相似
+      score += (DEPTH_RANK[c.type] || 0) * 0.15;
+      // 重复惩罚：如果候选在已有路径中
+      if (pathSet.has(c.next)) score -= 0.4;
+      // drift 惩罚
+      if (DRIFT_PATTERNS.some(d => c.next.includes(d) || c.reason.includes(d))) score -= 0.35;
+      // 等价循环惩罚：和上一轮 top-1 相同
+      if (prevTop && c.next === prevTop.next) score -= 0.2;
+      // 稳定性奖励：多轮一致
+      if (loopIdx >= 2) {
+        score += 0.05;
+      }
+      return score;
+    }
+
+    let haltReason = 'max_loops';
+    let allCandidates = [];
+    let prevTop = null;
+    const pathSet = new Set(path || []);
+    const loopCandidates = []; // 每轮的 top-1
+
+    for (let loop = 0; loop < maxLoops; loop++) {
+      let loopRaw;
+      try {
+        const res = await fetch(`${cfg.baseURL}/v1/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.apiKey}` },
+          body: JSON.stringify({
+            model: cfg.model,
+            max_tokens: 400,
+            messages: [
+              { role: 'system', content: '输出JSON数组。禁止解释。' },
+              { role: 'user', content: buildPrompt(loopCandidates) },
+            ],
+            temperature: Math.min(temperature + 0.1 * loop, 1.2), // 略微升温探索
+          }),
+        });
+        loopRaw = await res.text();
+      } catch (e) {
+        console.warn('deepHook loop error:', e.message);
+        break;
+      }
+
+      const cands = extractCandidates(loopRaw);
+      if (!cands || cands.length === 0) break;
+
+      allCandidates.push(...cands);
+
+      // 评分并排序
+      const scored = cands.map(c => ({ ...c, _score: scoreCandidate(c, prevTop, pathSet, loop) }))
+        .sort((a, b) => b._score - a._score);
+
+      const top = scored[0];
+      loopCandidates.push(top);
+
+      // halting 检查
+      if (loop >= 1) {
+        // 等价循环：连续两轮 top-1 相同
+        if (prevTop && top.next === prevTop.next) {
+          haltReason = 'equivalence_loop';
+          break;
+        }
+        // 稳定候选：top-1 显著高于第二名
+        if (scored.length >= 2 && top._score - scored[1]._score > 0.25) {
+          haltReason = 'stable_candidate';
+          break;
+        }
+      }
+
+      // drift 检测：候选命中 drift pattern
+      if (DRIFT_PATTERNS.some(d => top.next.includes(d) || top.reason.includes(d))) {
+        haltReason = 'drift_detected';
+        // 不 halt，但加重惩罚——让下一轮探索其他方向
+      }
+
+      prevTop = top;
+    }
+
+    // Coda：从所有候选中选最终 top-1
+    if (loopCandidates.length === 0) {
+      // fallback
+      const fallbacks = ['本质', '规律', '联系', '存在', '因果'];
+      return {
+        next: fallbacks[Math.floor(Math.random() * fallbacks.length)],
+        reason: '语言空间随机游走',
+        type: '递进',
+        diagnostics: { loops: 0, halt_reason: 'no_candidates', drift_score: 1.0, candidate_count: 0, candidates: [] },
+      };
+    }
+
+    const finalTop = loopCandidates[loopCandidates.length - 1];
+    // 计算 drift_score：候选命中 drift 模式的程度
+    const driftCount = allCandidates.filter(c =>
+      DRIFT_PATTERNS.some(d => c.next.includes(d) || c.reason.includes(d))
+    ).length;
+    const driftScore = allCandidates.length > 0 ? driftCount / allCandidates.length : 0;
+
+    return {
+      next: finalTop.next,
+      reason: finalTop.reason || '语言联想',
+      type: finalTop.type || '递进',
+      diagnostics: {
+        loops: loopCandidates.length,
+        halt_reason: haltReason,
+        drift_score: Math.round(driftScore * 100) / 100,
+        candidate_count: allCandidates.length,
+        candidates: allCandidates.slice(0, 10), // 保留前10个用于调试
+      },
+    };
+  }
+
   // ========== 游走 ==========
   async function startWalk(seed) {
     if (!cfg.apiKey) { alert('请先设置 API Key ⚙'); return; }
@@ -598,16 +790,23 @@
   }
 
   async function walk() {
+    const seedLabel = Gnodes[0] && Gnodes[0].label;
     while (running && Gnodes.length < cfg.maxSteps) {
       const cur = Gnodes.find(n => n.id === curN);
       if (!cur) break;
 
-      const r = await hook(cur.label);
+      const r = await deepHook({
+        seed: seedLabel,
+        current: cur.label,
+        path: steps.map(s => s.to),
+        maxLoops: MAX_LOOPS,
+        temperature: parseInt(document.getElementById('tmp-rng').value) / 10,
+      });
       let tgt = Gnodes.find(n => n.label === r.next);
       if (!tgt) { tgt = { id:'n'+(++nidCtr), label:r.next, fixed:false }; Gnodes.push(tgt); }
 
-      // 记录步骤
-      steps.push({ step:steps.length+1, from:cur.label, to:r.next, fromId:cur.id, toId:tgt.id, reason:r.reason, type:r.type, ts:new Date().toISOString() });
+      // 记录步骤（含诊断信息）
+      steps.push({ step:steps.length+1, from:cur.label, to:r.next, fromId:cur.id, toId:tgt.id, reason:r.reason, type:r.type, ts:new Date().toISOString(), diagnostics: r.diagnostics });
 
       // 边
       if (!Gedges.find(e=>e.from===cur.id&&e.to===tgt.id)) {
